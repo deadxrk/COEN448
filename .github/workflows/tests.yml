@@ -2,9 +2,10 @@ name: Python Scheduler Tests
 
 on:
   push:
-    branches: ["**"]
   pull_request:
-    branches: ["**"]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,10 +24,8 @@ jobs:
 
     env:
       PYTHONHASHSEED: "0"
-      PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
-      # Helps keep test output consistent in CI
-      PYTEST_ADDOPTS: "-ra --strict-markers --maxfail=1"
+      PYTHONDONTWRITEBYTECODE: "1"
 
     steps:
       - name: Checkout
@@ -36,25 +35,50 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: "pip"
+          cache: pip
+
+      - name: Show repo files (debug)
+        shell: bash
+        run: |
+          python -V
+          ls -la
+          echo "----"
+          find . -maxdepth 2 -type f \( -name "requirements*.txt" -o -name "pyproject.toml" -o -name "setup.py" -o -name "setup.cfg" \) -print
 
       - name: Install dependencies
         shell: bash
         run: |
           python -m pip install --upgrade pip wheel
-          # Prefer your project's declared deps if present
+
+          # 1) Prefer requirements files if they exist
           if [ -f requirements-dev.txt ]; then
             pip install -r requirements-dev.txt
           elif [ -f requirements.txt ]; then
             pip install -r requirements.txt
-          elif [ -f pyproject.toml ]; then
-            # Minimal fallback if you're using pyproject but no lock/installer specified
-            pip install .
+          # 2) Use Poetry only if this repo is actually Poetry-managed
+          elif [ -f pyproject.toml ] && grep -qE '^\[tool\.poetry\]' pyproject.toml; then
+            pip install poetry
+            poetry config virtualenvs.create false
+            poetry install --no-interaction --no-ansi
+          # 3) If it's a setuptools project, install it editable
+          elif [ -f setup.py ] || [ -f setup.cfg ]; then
+            pip install -e .
+          else
+            echo "No dependency manifest found; installing only test tooling."
           fi
 
-          # Ensure test tooling exists (safe even if already installed)
-          pip install pytest pytest-mock pytest-timeout
+          # Always ensure test tools exist
+          pip install pytest pytest-mock pytest-timeout pytest-asyncio
 
-      - name: Run unit tests
+          echo "---- pip freeze (debug) ----"
+          pip freeze | sed -n '1,200p'
+
+      - name: Run tests
+        shell: bash
         run: |
-          pytest -q --timeout=60 --timeout-method=thread
+          # If Poetry is used, run via Poetry; otherwise run directly
+          if [ -f pyproject.toml ] && grep -qE '^\[tool\.poetry\]' pyproject.toml; then
+            poetry run pytest -vv -ra --maxfail=1 --timeout=60 --timeout-method=thread
+          else
+            pytest -vv -ra --maxfail=1 --timeout=60 --timeout-method=thread
+          fi
